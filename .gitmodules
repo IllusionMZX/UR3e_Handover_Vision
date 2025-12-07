@@ -9,3 +9,6 @@
 [submodule "src/robotiq_2f_urcap_adapter"]
 	path = src/robotiq_2f_urcap_adapter
 	url = https://github.com/fzi-forschungszentrum-informatik/robotiq_2f_urcap_adapter.git
+[submodule "src/moveit_calibration"]
+	path = src/moveit_calibration
+	url = https://github.com/IllusionMZX/moveit_calibration.git
