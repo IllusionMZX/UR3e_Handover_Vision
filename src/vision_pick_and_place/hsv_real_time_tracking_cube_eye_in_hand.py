@@ -75,12 +75,109 @@ class HSVRealTimeTrackingNode(Node):
         self.rtde_r = RTDEReceiveInterface(self.ur_ip)
         self.get_logger().info("✓ 已连接到 UR3e")
         
+        # Enforce Initial Orientation
+        self._enforce_initial_orientation()
+
         # Tracking Mode Selection
         self.tracking_mode = 'tcp' # Default to TCP center tracking
         self._select_tracking_mode()
         
         self.get_logger().info(f'=== 木块实时跟踪节点已启动 (模式: {self.tracking_mode.upper()}) ===')
         self.get_logger().info('等待相机数据...')
+
+    def _enforce_initial_orientation(self):
+        """
+        Force the tool to a specific orientation before starting tracking.
+        Step 1: Align Tool Z axis to be perpendicular to Base Z (Horizontal).
+        Step 2: Align Tool X axis to be perpendicular to Base Z (Horizontal).
+        Result: Tool Z and X are horizontal, Tool Y is vertical.
+        """
+        self.get_logger().info("正在调整初始姿态 / Adjusting initial orientation...")
+        
+        # Speed settings (Slower)
+        speed = 0.05
+        accel = 0.05
+        
+        # --- Step 1: Align Z Axis (Horizontal) ---
+        self.get_logger().info("Step 1: Aligning Z-axis horizontal...")
+        
+        # 1. Get Current Pose
+        current_tcp_pose = self.rtde_r.getActualTCPPose()
+        current_pos = current_tcp_pose[:3]
+        current_rot = current_tcp_pose[3:]
+        
+        R_curr, _ = cv2.Rodrigues(np.array(current_rot))
+        x_tool_curr = R_curr[:, 0]
+        z_tool_curr = R_curr[:, 2]
+        
+        # Project Tool Z to Horizontal Plane
+        z_tool_new = np.array([z_tool_curr[0], z_tool_curr[1], 0.0])
+        norm_z = np.linalg.norm(z_tool_new)
+        
+        if norm_z < 1e-6:
+            z_tool_new = np.array([-1.0, 0.0, 0.0])
+        else:
+            z_tool_new = z_tool_new / norm_z
+            
+        # Compute intermediate frame (Z aligned, X close to original)
+        # We want Y_temp perpendicular to Z_new and X_curr
+        y_tool_temp = np.cross(z_tool_new, x_tool_curr)
+        norm_y = np.linalg.norm(y_tool_temp)
+        if norm_y < 1e-6:
+             y_tool_temp = np.array([0, 0, 1]) # Fallback
+        y_tool_temp = y_tool_temp / np.linalg.norm(y_tool_temp)
+        
+        x_tool_temp = np.cross(y_tool_temp, z_tool_new)
+        
+        R_target_1 = np.column_stack((x_tool_temp, y_tool_temp, z_tool_new))
+        rvec_1, _ = cv2.Rodrigues(R_target_1)
+        rx1, ry1, rz1 = rvec_1.flatten()
+        
+        target_pose_1 = [current_pos[0], current_pos[1], current_pos[2], rx1, ry1, rz1]
+        
+        try:
+            self.rtde_c.moveL(target_pose_1, speed, accel, asynchronous=False)
+        except Exception as e:
+            self.get_logger().error(f"Step 1 failed: {e}")
+            return
+
+        # --- Step 2: Align X Axis (Horizontal) ---
+        self.get_logger().info("Step 2: Aligning X-axis horizontal...")
+        
+        # Update current pose (should be at target_pose_1)
+        # But we use the calculated vectors from Step 1 as base to ensure consistency
+        # z_tool_final is z_tool_new
+        
+        # We want X final to be horizontal.
+        # Since Z is horizontal, X must be perpendicular to Z and horizontal.
+        # This means X is parallel to the cross product of Z and World-Up (0,0,1).
+        
+        world_up = np.array([0.0, 0.0, 1.0])
+        x_candidate = np.cross(z_tool_new, world_up) # This is horizontal
+        # x_candidate is perpendicular to Z and Up.
+        
+        # Check direction: We want X final to be close to X temp (from Step 1)
+        if np.dot(x_candidate, x_tool_temp) < 0:
+            x_tool_final = -x_candidate
+        else:
+            x_tool_final = x_candidate
+            
+        x_tool_final = x_tool_final / np.linalg.norm(x_tool_final)
+        
+        # Recalculate Y (Will be vertical)
+        y_tool_final = np.cross(z_tool_new, x_tool_final)
+        
+        R_target_2 = np.column_stack((x_tool_final, y_tool_final, z_tool_new))
+        rvec_2, _ = cv2.Rodrigues(R_target_2)
+        rx2, ry2, rz2 = rvec_2.flatten()
+        
+        target_pose_2 = [current_pos[0], current_pos[1], current_pos[2], rx2, ry2, rz2]
+        
+        try:
+            self.rtde_c.moveL(target_pose_2, speed, accel, asynchronous=False)
+            self.get_logger().info("初始姿态调整完成 / Initial orientation adjustment complete.")
+        except Exception as e:
+            self.get_logger().error(f"Step 2 failed: {e}")
 
     def _select_tracking_mode(self):
         """Ask user for tracking mode"""
