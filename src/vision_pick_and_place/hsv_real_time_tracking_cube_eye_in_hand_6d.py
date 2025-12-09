@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 
 """
-Real-Time Tracking of a Green Cube using HSV Color Segmentation with Eye-in-Hand Camera on UR3e
-This node detects a green cube in the camera feed, estimates its 3D position using depth data,
-and commands the UR3e robot to track the cube in real-time by adjusting its TCP position.
-The tracking can be done either by aligning the camera center with the cube or by aligning the
-TCP center with the cube, based on user selection at startup.
+Still with some errors, needs further testing and refinement!
+Don't use it in the real robot yet!
 
-Z-mapping is applied to keep the TCP at a fixed distance from the cube, the depth distance is mapped linearly to [0m,1.6m] range, 0.8m is the center point, and the range is mapped to [-0.1m, +0.1m] displacement from the initial position.
+Real-time HSV-based 6D Tracking of a Wood Block with Eye-in-Hand Camera on UR3e Robot.
+Adapted from hsv_real_time_tracking_cube_eye_in_hand.py
 
 Author: Miao Zixiang
 Date: 2025-12-09
+
 """
 
 import rclpy
@@ -30,9 +29,9 @@ import math
 from rtde_control import RTDEControlInterface
 from rtde_receive import RTDEReceiveInterface
 
-class HSVRealTimeTrackingNode(Node):
+class HSVRealTimeTracking6DNode(Node):
     def __init__(self):
-        super().__init__('hsv_real_time_tracking')
+        super().__init__('hsv_real_time_tracking_6d')
         
         # Parameters
         self.target_frame = 'base_link' 
@@ -264,71 +263,33 @@ class HSVRealTimeTrackingNode(Node):
                             d1 = np.linalg.norm(p0-p1)
                             d2 = np.linalg.norm(p1-p2)
                             
-                            if d1 > d2:
+                            # Select the SHORT edge to align with Tool X (Gripper Closing Direction)
+                            # If Gripper closes along X, we want X to align with the width (short side) of the block.
+                            if d1 < d2: 
                                 vec_img = p1 - p0
                             else:
                                 vec_img = p2 - p1
                                 
                             angle_img = math.atan2(vec_img[1], vec_img[0])
                             
-                            # 2. Calculate Angle in Base Frame (Y-Z Plane)
-                            # We need to transform the vector from Camera to Base
-                            # Construct two points in Camera frame
-                            # P1 is center (already transformed as point_base)
-                            # P2 is a point along the angle
+                            # Normalize angle to [-pi/2, pi/2] for 180-degree symmetry (Rectangle)
+                            if angle_img > math.pi/2:
+                                angle_img -= math.pi
+                            elif angle_img < -math.pi/2:
+                                angle_img += math.pi
+                                
+                            # We want to align the Gripper (Tool X/Y) with this angle.
+                            # Assuming we want to rotate the Tool Z axis to minimize this angle.
+                            # If angle_img is positive, the object is rotated CCW relative to Camera X.
+                            # We should rotate the Tool CCW to align.
                             
-                            cx2 = cx + math.cos(angle_img) * 20
-                            cy2 = cy + math.sin(angle_img) * 20
-                            
-                            x2_cam = (cx2 - ppx) * z_meters / fx
-                            y2_cam = (cy2 - ppy) * z_meters / fy
-                            z2_cam = z_meters
-                            
-                            point_cam2 = tf2_geometry_msgs.PointStamped()
-                            point_cam2.header.frame_id = self.camera_frame
-                            point_cam2.header.stamp = point_cam.header.stamp
-                            point_cam2.point.x = x2_cam
-                            point_cam2.point.y = y2_cam
-                            point_cam2.point.z = z2_cam
-                            
-                            point_base2 = self.tf_buffer.transform(point_cam2, self.target_frame, timeout=rclpy.duration.Duration(seconds=0.1))
-                            
-                            # Vector in Base Frame
-                            vy_base = point_base2.point.x - point_base.point.x # Not used for angle in Y-Z plane
-                            vy_base = point_base2.point.y - point_base.point.y
-                            vz_base = point_base2.point.z - point_base.point.z
-                            
-                            # Angle in Y-Z plane
-                            angle_yz = math.atan2(vz_base, vy_base)
-                            
-                            # 3. Construct Target Rotation
-                            # Tool Z = [-1, 0, 0] (Base -X)
-                            # Tool X should be perpendicular to Z and aligned with object short axis
-                            # Object long axis is angle_yz. Short axis is angle_yz + 90.
-                            
-                            theta = angle_yz + math.pi/2
-                            c_t = math.cos(theta)
-                            s_t = math.sin(theta)
-                            
-                            # R = [X_col, Y_col, Z_col]
-                            # Z_col = [-1, 0, 0]
-                            # X_col = [0, cos(theta), sin(theta)] (In Y-Z plane)
-                            # Y_col = Z x X = [0, sin(theta), -cos(theta)]
-                            
-                            R_target = np.array([
-                                [0,   0,   -1],
-                                [c_t, s_t,  0],
-                                [s_t, -c_t, 0]
-                            ])
-                            
-                            rvec, _ = cv2.Rodrigues(R_target)
-                            rx, ry, rz = rvec.flatten()
+                            rotation_z_step = angle_img * 0.5 # Proportional gain 0.5
 
                             # 4. Calculate Target Pose
                             # Strategy: 
                             # Position: Move in Tool X/Y plane.
                             #           Keep Tool Z (depth) unchanged relative to the object.
-                            # Orientation: Keep Current Orientation.
+                            # Orientation: Rotate around Tool Z to align with object.
                             
                             # A. Position Calculation
                             # 1. Get Current TCP Pose (Controller Frame)
@@ -417,14 +378,32 @@ class HSVRealTimeTrackingNode(Node):
                             # 6. New Target Position
                             target_pos_ctrl = current_pos + offset_ctrl
                             
-                            # B. Orientation Calculation (Keep Current Orientation)
+                            # B. Orientation Calculation (Rotate around Tool Z)
+                            # We calculated rotation_z_step earlier based on angle_img
+                            
+                            # Construct Rotation Matrix for Z-rotation
+                            c_z = math.cos(rotation_z_step)
+                            s_z = math.sin(rotation_z_step)
+                            R_z_rot = np.array([
+                                [c_z, -s_z, 0],
+                                [s_z,  c_z, 0],
+                                [0,    0,   1]
+                            ])
+                            
+                            # Apply rotation in Tool Frame (Post-multiply)
+                            R_target = R_curr @ R_z_rot
+                            
+                            # Convert back to Rodrigues vector
+                            target_rot_vec_new, _ = cv2.Rodrigues(R_target)
+                            target_rot_vec_new = target_rot_vec_new.flatten()
+                            
                             target_pose = [
                                 target_pos_ctrl[0],
                                 target_pos_ctrl[1],
                                 target_pos_ctrl[2],
-                                current_rot_vec[0], 
-                                current_rot_vec[1], 
-                                current_rot_vec[2],
+                                target_rot_vec_new[0], 
+                                target_rot_vec_new[1], 
+                                target_rot_vec_new[2],
                             ]
                             
                             # Check reachability (UR3e max reach ~0.5m + Tool Length)
@@ -461,7 +440,7 @@ class HSVRealTimeTrackingNode(Node):
                                 try:
                                     tool0_pos = None # Not querying to save time/complexity if not needed
                                     self._log_detection_details(cv_depth.shape, cx, cy, ppx, ppy, z_meters, fx, fy, x_cam, y_cam, z_cam, tool0_pos, None, point_base)
-                                    self.get_logger().info(f"Angle Y-Z: {math.degrees(angle_yz):.1f} deg")
+                                    self.get_logger().info(f"Angle Img: {math.degrees(angle_img):.1f} deg")
                                     self.get_logger().info(f"Mode: {self.tracking_mode} | Target Pose (Controller): {target_pose}")
                                 except Exception as e:
                                     self.get_logger().warn(f"Logging error: {e}")
@@ -523,7 +502,7 @@ class HSVRealTimeTrackingNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = HSVRealTimeTrackingNode()
+    node = HSVRealTimeTracking6DNode()
     
     executor = MultiThreadedExecutor()
     executor.add_node(node)

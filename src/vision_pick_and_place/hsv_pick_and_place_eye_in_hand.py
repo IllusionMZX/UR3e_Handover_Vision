@@ -1,4 +1,13 @@
 #!/usr/bin/env python3
+"""
+HSV-Based Pick and Place Node for UR3e with Eye-in-Hand Camera
+This node detects green objects (wood blocks) and blue objects (placement targets) using HSV color segmentation.
+It calculates the 6D pose of the objects and commands the UR3e robot to pick and place them using RTDE interface.
+
+Author: Miao Zixiang
+Date: 2025-12-08
+"""
+
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
@@ -18,9 +27,9 @@ from rtde_receive import RTDEReceiveInterface
 from robotiq_2f_urcap_adapter.action import GripperCommand
 from robotiq_2f_urcap_adapter.msg import GripperCommand as GripperCommandMsg
 
-class CalibrationVerification(Node):
+class HSVPickAndPlaceNode(Node):
     def __init__(self):
-        super().__init__('calibration_verification')
+        super().__init__('hsv_pick_and_place')
         
         # Parameters
         self.target_frame = 'base_link' 
@@ -43,7 +52,7 @@ class CalibrationVerification(Node):
         self.create_subscription(CameraInfo, '/camera/camera/color/camera_info', self.info_callback, 1, callback_group=self.callback_group)
         
         # Publishers
-        self.debug_pub = self.create_publisher(Image, '/calibration_verification/debug_image', 1, callback_group=self.callback_group)
+        self.debug_pub = self.create_publisher(Image, '/pick_and_place/debug_image', 1, callback_group=self.callback_group)
         
         # Action Client
         self._action_client = ActionClient(self, GripperCommand, '/robotiq_2f_urcap_adapter/gripper_command', callback_group=self.callback_group)
@@ -454,7 +463,6 @@ class CalibrationVerification(Node):
                                     angle_base = 0.0
                                     angle_target = 0.0
 
-                                # 计算目标位置 (Match verify_calibration.py logic)
                                 # 在Z轴方向增加15cm保护空间
                                 target_pose = [
                                     -point_base.point.x,
@@ -646,7 +654,7 @@ class CalibrationVerification(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = CalibrationVerification()
+    node = HSVPickAndPlaceNode()
     
     executor = MultiThreadedExecutor()
     executor.add_node(node)
