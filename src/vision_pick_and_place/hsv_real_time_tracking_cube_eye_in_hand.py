@@ -50,6 +50,7 @@ class CalibrationVerification(Node):
         self.frame_count = 0
         self.last_update_time = 0
         self.initial_fixed_x = None # Store the initial X position
+        self.initial_pos = None # Store the initial TCP position for Z-mapping
         self.is_moving = False # Flag to track robot movement status
         self.position_history = [] # For stability check
         self.stability_threshold = 0.01 # 1cm stability threshold
@@ -322,15 +323,51 @@ class CalibrationVerification(Node):
                             current_rot_vec = np.array(current_tcp_pose[3:])
                             R_curr, _ = cv2.Rodrigues(current_rot_vec)
                             
+                            # Initialize initial_pos if not set
+                            if self.initial_pos is None:
+                                self.initial_pos = current_pos.copy()
+                                self.get_logger().info(f"Initial Position Recorded: {self.initial_pos}")
+
                             offset_ctrl = np.zeros(3)
+                            
+                            # Z-axis Depth Mapping Logic
+                            # Center: 0.8m (Maps to 0 displacement from initial_pos)
+                            # Range: 0m to 1.6m
+                            # Output Range: -10cm to +10cm
+                            # Logic: 
+                            #   - Calculate target Z displacement based on z_meters
+                            #   - Calculate current Z displacement from initial_pos (projected on Tool Z axis)
+                            #   - Calculate required move (z_correction)
+                            
+                            # 1. Calculate Target Displacement (Linear Mapping)
+                            # Slope = (0.1 - (-0.1)) / (1.6 - 0.0) = 0.2 / 1.6 = 0.125
+                            # Formula: target_disp = 0.125 * (z_meters - 0.8)
+                            target_z_disp = 0.125 * (z_meters - 0.8)
+                            
+                            # 2. Clamp Target Displacement (-10cm to +10cm)
+                            # Also handles z_meters > 1.6m (maintains +10cm)
+                            target_z_disp = max(min(target_z_disp, 0.1), -0.1)
+                            
+                            # 3. Calculate Current Displacement along Tool Z Axis
+                            # Tool Z axis in Controller Frame is the 3rd column of R_curr
+                            tool_z_axis = R_curr[:, 2]
+                            
+                            # Vector from Initial Pos to Current Pos
+                            diff_pos = current_pos - self.initial_pos
+                            
+                            # Project onto Tool Z axis
+                            current_z_disp = np.dot(diff_pos, tool_z_axis)
+                            
+                            # 4. Calculate Required Move (Step)
+                            z_correction = target_z_disp - current_z_disp
                             
                             if self.tracking_mode == 'camera':
                                 # --- Mode 1: Camera Center Alignment ---
                                 # We want to move the tool such that the object (currently at x_cam, y_cam) moves to (0,0) in Camera Frame.
-                                # So we shift the tool by (x_cam, y_cam, 0) in Tool Frame.
+                                # So we shift the tool by (x_cam, y_cam, z_correction) in Tool Frame.
                                 # Note: This assumes Camera Frame axes are aligned with Tool Frame axes (which is roughly true for Eye-in-Hand)
                                 
-                                offset_tool = np.array([x_cam, y_cam, 0.0])
+                                offset_tool = np.array([x_cam, y_cam, z_correction])
                                 offset_ctrl = R_curr @ offset_tool
                                 
                             else: # self.tracking_mode == 'tcp'
@@ -357,8 +394,8 @@ class CalibrationVerification(Node):
                                 P_obj_tcp = T_tcp_ctrl @ P_obj_ctrl
                                 
                                 # Calculate Offset in TCP Frame
-                                # Required Move in TCP: (x, y, 0)
-                                offset_tcp = np.array([P_obj_tcp[0], P_obj_tcp[1], 0.0])
+                                # Required Move in TCP: (x, y, z_correction)
+                                offset_tcp = np.array([P_obj_tcp[0], P_obj_tcp[1], z_correction])
                                 
                                 # Transform Offset to Controller Frame
                                 offset_ctrl = R_curr @ offset_tcp
