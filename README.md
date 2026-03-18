@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🤖 UR3e Human-to-Robot Handover Based on Stereo Vision 👁️
+# 🤖 UR3e PICK AND PLACE EXAMPLE
 
 [English](#english) | [中文](#chinese)
 
